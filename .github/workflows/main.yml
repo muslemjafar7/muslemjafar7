@@ -1,0 +1,121 @@
+name: Windows Utility Runner (6 Hours)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  runner-job:
+    runs-on: windows-latest
+    timeout-minutes: 360
+
+    strategy:
+      max-parallel: 3
+      matrix:
+        node: [1,2,3]
+
+    steps:
+      - name: Startup Delay
+        shell: powershell
+        run: |
+          Start-Sleep -Seconds (Get-Random -Minimum 10 -Maximum 40)
+
+      - name: Prepare RDP
+        shell: powershell
+        run: |
+          try {
+            Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' `
+              -Name "fDenyTSConnections" -Value 0
+
+            Enable-NetFirewallRule -DisplayGroup "Remote Desktop"
+          } catch {}
+
+      - name: Create User
+        shell: powershell
+        run: |
+          $username = "user$env:GITHUB_RUN_NUMBER"
+
+          $chars = ([char[]](33..126))
+          $password = -join ($chars | Get-Random -Count 12)
+
+          $securePass = ConvertTo-SecureString $password -AsPlainText -Force
+
+          try {
+            New-LocalUser -Name $username -Password $securePass
+            Add-LocalGroupMember -Group "Administrators" -Member $username
+          } catch {}
+
+          echo "R_USER=$username" >> $env:GITHUB_ENV
+          echo "R_PASS=$password" >> $env:GITHUB_ENV
+
+      - name: Install Tailscale
+        shell: powershell
+        run: |
+          Invoke-WebRequest https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi -OutFile ts.msi
+          Start-Process msiexec.exe -ArgumentList "/i ts.msi /quiet /norestart" -Wait
+
+      - name: Connect Tailscale
+        shell: powershell
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          $node = "${{ matrix.node }}"
+          $hostname = "node$env:GITHUB_RUN_ID$node"
+
+          $success = $false
+
+          for ($i=0; $i -lt 3; $i++) {
+            & $ts up `
+              --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} `
+              --hostname=$hostname `
+              --reset
+
+            Start-Sleep -Seconds 10
+
+            $status = & $ts status
+
+            if ($status -notmatch "NeedsLogin") {
+              $success = $true
+              break
+            }
+
+            Start-Sleep -Seconds 5
+          }
+
+          if (-not $success) {
+            Write-Error "Tailscale login failed"
+            exit 1
+          }
+
+          $ip = ""
+          for ($i=0; $i -lt 5; $i++) {
+            $ip = & $ts ip -4
+            if ($ip) { break }
+            Start-Sleep -Seconds 5
+          }
+
+          if (-not $ip) {
+            Write-Error "No IP"
+            exit 1
+          }
+
+          echo "R_HOST=$ip" >> $env:GITHUB_ENV
+
+      - name: Show Info
+        shell: powershell
+        run: |
+          Write-Host "=== ACCESS INFO ==="
+          Write-Host "Host : $env:R_HOST"
+          Write-Host "User : $env:R_USER"
+          Write-Host "Pass : $env:R_PASS"
+          Write-Host "Node : ${{ matrix.node }}"
+          Write-Host "==================="
+
+      - name: Active Session (6 Hours)
+        shell: powershell
+        run: |
+          $end = (Get-Date).AddMinutes(360)
+
+          while ((Get-Date) -lt $end) {
+            Get-Process | Out-Null
+            Start-Sleep -Seconds (Get-Random -Minimum 120 -Maximum 300)
+          }
